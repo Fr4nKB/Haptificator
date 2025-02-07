@@ -133,7 +133,7 @@ def create_vibration_wave(peaks_with_timestamps, song_duration):
     # add silent segment from start to first beat
     waves = [AudioSegment.silent(duration=peaks_with_timestamps[0][0], frame_rate=SAMPLE_RATE)]
 
-    # generate a exp decaying wave for each beat
+    # generate a wave for each beat
     for counter in range(0, n_peaks):
         timestamp, peak_value = peaks_with_timestamps[counter]
         next_timestamp, _ = (song_duration, 0) if counter + 1 == n_peaks else peaks_with_timestamps[counter + 1]
