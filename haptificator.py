@@ -52,38 +52,74 @@ def extract_beats_with_timestamps(file_path):
     
     return beats_with_timestamps
 
+def get_wave_data(t, values, start, stop, peak_factor, frequency):
+    return peak_factor * np.sin(2 * np.pi * frequency * t[start:start+stop]) * values
 
-def generate_wave(frequency, duration_ms, peak_factor, silence_threshold=0.05):
+def generate_wave(frequency, duration_ms, peak_factor, silence_perc=0.5):
     """
-    Generate a sound wave with exponential decay and silence threshold.
-    
+    Generate a sine wave with peak at start, stabilized amplitude, and peak at end, silence at the end.
+
     Parameters:
     frequency (float): The frequency of the wave in Hz.
     duration_ms (int): The duration of the wave in milliseconds.
     peak_factor (float): The peak amplitude factor.
-    silence_threshold (float): The threshold for silence below which the amplitude is set to 0 (default 0.05).
-    
+    silence_perc (float): The percentage of the duration that will be silent, the silent portion is placed after the wave (default 50%).
+
     Returns:
     AudioSegment: The generated audio segment.
     """
-    duration = duration_ms / 1000.0
-
-    # Generate the sound wave with dynamic exponential decay
-    t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
-    decay_factor = 5.0 / duration  # Adjust decay factor based on duration
-    decay = np.exp(-decay_factor * t)
+    total_duration_s = duration_ms / 1000.0
+    total_silence_duration_ms = duration_ms * silence_perc
+    total_silence_duration_s = total_silence_duration_ms / 1000.0
+    t = np.linspace(0, total_duration_s, int(SAMPLE_RATE * total_duration_s), endpoint=False)
     
-    # Apply silence threshold
-    decay[decay < silence_threshold] = 0
+    # calculate silence duration in samples
+    silence_duration = int(total_silence_duration_s * SAMPLE_RATE)
     
-    sound_wave = peak_factor * np.sin(2 * np.pi * frequency * t) * decay  # Apply decay and silence
+    # adjust durations for attack, sustain, and release considering silence
+    effective_duration = len(t) - silence_duration
+    attack_duration = int(0.08 * effective_duration)
+    sustain_duration = int(0.8 * effective_duration)
+    release_duration = int(0.08 * effective_duration)
+    transient_duration = int(0.02 * effective_duration)
+    
+    total_sound_duration = attack_duration + sustain_duration + release_duration + 2*transient_duration
+    if total_sound_duration > effective_duration:
+        sustain_duration -= total_sound_duration - effective_duration
+    elif total_sound_duration < effective_duration:
+        sustain_duration += effective_duration - total_sound_duration
 
-    # Convert to 16-bit PCM format
-    sound_wave = (sound_wave * 32767).astype(np.int16)
+    transient_start = np.linspace(0, 1, num=transient_duration)
+    attack = np.linspace(1, 0.25, num=attack_duration)
+    sustain = np.linspace(0.25, 0.25, num=sustain_duration)
+    release = np.linspace(0.25, 1, num=release_duration)
+    transient_end = np.linspace(1, 0, num=transient_duration)
+    
+    # Generate the sound wave with adjusted frequency for the sustain period
+    sound_wave = np.zeros(effective_duration)
+    start = 0
 
-    # Create an AudioSegment from the sound wave
-    audio = AudioSegment(sound_wave.tobytes(), frame_rate=SAMPLE_RATE, sample_width=2, channels=1)
-    return audio
+    sound_wave[:transient_duration] = get_wave_data(t, transient_start, 0, transient_duration, peak_factor, frequency)
+    start += transient_duration
+
+    sound_wave[start:start+attack_duration] = get_wave_data(t, attack, start, attack_duration, peak_factor, frequency)
+    start += attack_duration
+
+    sound_wave[start:start+sustain_duration] = get_wave_data(t, sustain, start, sustain_duration, peak_factor, frequency)
+    start += sustain_duration
+
+    sound_wave[start:start+release_duration] = get_wave_data(t, release, start, release_duration, peak_factor, frequency)
+    start += release_duration
+
+    sound_wave[start:] = get_wave_data(t, transient_end, start, transient_duration, peak_factor, frequency)
+    sound_wave = (sound_wave * 32767).astype(np.int16)  # convert to 16-bit PCM format
+
+    audio = AudioSegment(sound_wave.tobytes(), frame_rate=SAMPLE_RATE, sample_width=2, channels=1)    
+    # silence after wave
+    silence = AudioSegment.silent(duration=total_silence_duration_ms)
+    audio_with_silence = audio + silence
+    
+    return audio_with_silence
 
 
 def create_vibration_wave(peaks_with_timestamps, song_duration):
@@ -106,7 +142,7 @@ def create_vibration_wave(peaks_with_timestamps, song_duration):
         peak_factor = peak_value/max_peak_value
 
         # amplitude and frequency are adjusted dynamically based on the peak intensity
-        wave = generate_wave(100 * peak_factor, duration_ms, peak_factor)
+        wave = generate_wave(120 * peak_factor, duration_ms, peak_factor * 1.2)    # little boost to amplitude
         waves.append(wave)
 
     sound_sequence = AudioSegment.empty()
@@ -118,9 +154,8 @@ def create_vibration_wave(peaks_with_timestamps, song_duration):
 
 def convert_to_wav(file_path):
     ogg_audio = AudioSegment.from_file(file_path, format="ogg")
-    ogg_audio = ogg_audio.set_frame_rate(44100).set_channels(2).set_sample_width(2)
+    ogg_audio = ogg_audio.set_frame_rate(SAMPLE_RATE).set_channels(2).set_sample_width(2)
     ogg_audio.export("temp.wav", format="wav")
-
 
 
 def merge_vibration_with_sound(original_file_path, wav_file_path, vibration_wave, output_file_path):
@@ -143,7 +178,7 @@ def merge_vibration_with_sound(original_file_path, wav_file_path, vibration_wave
     right = wav_audio.split_to_mono()[1]
 
     # the vibration wave duration is slightly shorter, adjust left and right channel accordingly
-    duration = int(vibration_wave.duration_seconds * 1000) 
+    duration = int(vibration_wave.duration_seconds * 1000)
     left = left[:duration]
     right = right[:duration]
     vibration_wave = vibration_wave[:duration]
@@ -156,7 +191,7 @@ def merge_vibration_with_sound(original_file_path, wav_file_path, vibration_wave
     if tmp_file_path.exists() and tmp_file_path.is_file():
         tmp_file_path.unlink()
 
-    # ensure compatibility for Glyphify and other composition tools
+    # ensure compatibility
     try:
         original_file = OggOpus(original_file_path)
     except:
